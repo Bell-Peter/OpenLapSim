@@ -86,14 +86,9 @@ class RunOpenLapSim:
         trackFile = (self.trackFilesPath+self.trackFileName)
         l1 = LapTimeSimCalc(trackFile, aE.accEnvDict, None)
         l1.Run()
-        tend = time.time()
-        print(tend - tstart)
         l2 = LapTimeSimCalc(trackFile, aE.accEnvDict,
                             l1)
         l2.Run()
-        tend = time.time()
-        print(tend - tstart)
-
         # set output channels from simulation for Export
         vcar = l2.lapTimeSimDict["vcar"]  # car speed [m/s]
         dist = l2.lapTimeSimDict["dist"]  # circuit dist [m]
