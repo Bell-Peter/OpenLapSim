@@ -20,13 +20,16 @@ import scipy.interpolate as interp
 
 class LapTimeSimCalc:
 
-    def __init__(self, TrackFile, accEnvDict, vxaccStart):
+    def __init__(self, TrackFile, accEnvDict, prevLap = None):
         # inputs
+        self.prevLap = prevLap
         self.TrackFile = TrackFile
-        self.GGVacc = None
-        self.GGVdec = None
+        # will use previous lap GGVacc and GGVdec if available to save recalculation.
+        self.GGVacc = self.prevLap.lapTimeSimDict["GGVacc"] if prevLap else None
+        self.GGVdec = self.prevLap.lapTimeSimDict["GGVdec"] if prevLap else None
         self.GGVfull = accEnvDict["GGVfull"]  # ax,ay,vx
-        self.vxaccStart = vxaccStart
+        # Gets the starting speed from previous lap if available.
+        self.vxaccStart = self.prevLap.lapTimeSimDict["vxaccEnd"] if prevLap else 10
         # outputs
         self.lapTimeSimDict = {
             "vcar": None,
@@ -76,8 +79,9 @@ class LapTimeSimCalc:
         return axcombine
 
     def Run(self):
-        # Split the full GGV in acc and dec
-        self.GGVacc, self.GGVdec = LapTimeSimCalc.splitGGVfull(self.GGVfull)
+        # Split the full GGV in acc and dec, if not already done
+        if not self.prevLap:
+            self.GGVacc, self.GGVdec = LapTimeSimCalc.splitGGVfull(self.GGVfull)
 
         # Load TrackFile
         track = np.loadtxt(self.TrackFile)
@@ -88,23 +92,27 @@ class LapTimeSimCalc:
         small = 0.00000001  # to avoid division by zero
 
         # 1. Max Cornering Speed ---------------------------------------------
-        curvvect = np.array([])
-        vxvect = np.array([])
-        for i in range(len(self.GGVacc[:, 2])):
-            # if ax == 0 & ay is positive
-            if(self.GGVacc[i, 0] == 0) and (self.GGVacc[i, 1] >= 0):
-                vxclipped = max(self.GGVacc[i, 2], small)  # to avoid div by zero
-                curvvect = np.append(curvvect, self.GGVacc[i, 1]/pow(vxclipped, 2))  # C=ay/v^2
-                vxvect = np.append(vxvect, vxclipped)
-        curvvect[0] = 0.5
-        curvclipped = np.zeros(len(curv))
-        for i in range(len(curv)):
-            # curvature clipped to max speed
-            curvclipped[i] = max(np.absolute(curv[i]), min(curvvect))
-        # v corner from pure lateral (ay)
-        vxcor = np.interp(curvclipped, curvvect, vxvect, period=360)
+        # if previous lap available use its cornering speed
+        if not self.prevLap:
+            curvvect = np.array([])
+            vxvect = np.array([])
+            for i in range(len(self.GGVacc[:, 2])):
+                # if ax == 0 & ay is positive
+                if(self.GGVacc[i, 0] == 0) and (self.GGVacc[i, 1] >= 0):
+                    vxclipped = max(self.GGVacc[i, 2], small)  # to avoid div by zero
+                    curvvect = np.append(curvvect, self.GGVacc[i, 1]/pow(vxclipped, 2))  # C=ay/v^2
+                    vxvect = np.append(vxvect, vxclipped)
+            curvvect[0] = 0.5
+            curvclipped = np.zeros(len(curv))
+            for i in range(len(curv)):
+                # curvature clipped to max speed
+                curvclipped[i] = max(np.absolute(curv[i]), min(curvvect))
+            # v corner from pure lateral (ay)
+            vxcor = np.interp(curvclipped, curvvect, vxvect, period=360)
+        else:
+            vxcor = self.prevLap.lapTimeSimDict["vxcor"]
 
-        # 2. Max Acceleration Speed ------------------------------------------
+        # 2. Max Acceleration Speed ------------------------------------------    
         vxacc = np.zeros(len(curv))
         vxacc[0] = self.vxaccStart  # must be the last vacc
         ayreal = np.zeros(len(curv))
@@ -117,21 +125,34 @@ class LapTimeSimCalc:
                                                         X, Y, Z)
             vxacc[i+1] = min(vxcor[i+1], (vxacc[i]+(dist[i+1]-dist[i])
                                           / vxacc[i]*axcombine[i]))
+            # If a previous lap exists, once it reaches the same speed as the previous lap,
+            # it uses previous lap from that point onward to save computation time.
+            if self.prevLap:
+                lapPointIndex = None
+                if vxacc[i+1] == self.prevLap.lapTimeSimDict["vxacc"][i+1]:
+                    lapPointIndex = i
+                    vxacc[lapPointIndex:] = self.prevLap.lapTimeSimDict["vxacc"][lapPointIndex:]
+                    break
+
 
         # 3. Max Deceleration Speed ------------------------------------------
-        vxdec = np.zeros(len(curv))
-        vxdec[-1] = vxacc[-1]
-        ayreal = np.zeros(len(curv))
-        axcombine = np.zeros(len(curv))
+        if not self.prevLap:
+            vxdec = np.zeros(len(curv))
+            vxdec[-1] = vxacc[-1]
+            ayreal = np.zeros(len(curv))
+            axcombine = np.zeros(len(curv))
 
-        X, Y, Z = self.GGVdec[:, 0], self.GGVdec[:, 1], self.GGVdec[:, 2]
-        for i in reversed(range(len(dist))):
-            ayreal[i] = pow(vxdec[i], 2)/(1/max(curv[i], small))
-            axcombine[i] = LapTimeSimCalc.GGVSurfInterp(vxdec[i], ayreal[i],
-                                                        X, Y, Z)
-            vxdec[i-1] = min(vxcor[i-1], (vxdec[i]+(dist[i-1]-dist[i])
-                                          / vxdec[i]*axcombine[i]))
-        vxdec[-1] = vxacc[-1]
+            X, Y, Z = self.GGVdec[:, 0], self.GGVdec[:, 1], self.GGVdec[:, 2]
+            for i in reversed(range(len(dist))):
+                ayreal[i] = pow(vxdec[i], 2)/(1/max(curv[i], small))
+                axcombine[i] = LapTimeSimCalc.GGVSurfInterp(vxdec[i], ayreal[i],
+                                                            X, Y, Z)
+                vxdec[i-1] = min(vxcor[i-1], (vxdec[i]+(dist[i-1]-dist[i])
+                                            / vxdec[i]*axcombine[i]))
+            vxdec[-1] = vxacc[-1]
+        #if previous lap available use its deceleration speed
+        else:
+            vxdec = self.prevLap.lapTimeSimDict["vxdec"]
 
         # Final speed (vcar) ---------------------------------------------
         vcar = np.zeros(len(dist))
