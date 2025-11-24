@@ -16,14 +16,11 @@ by Python 3.7
 # Import Packages
 import numpy as np
 import scipy.interpolate as interp
-
-
 class LapTimeSimCalc:
-
     def __init__(self, TrackFile, accEnvDict, prevLap = None):
         # inputs
         self.prevLap = prevLap
-        self.TrackFile = TrackFile
+        self.track = np.loadtxt(TrackFile)
         # will use previous lap GGVacc and GGVdec if available to save recalculation.
         self.GGVacc = self.prevLap.lapTimeSimDict["GGVacc"] if prevLap else None
         self.GGVdec = self.prevLap.lapTimeSimDict["GGVdec"] if prevLap else None
@@ -71,25 +68,22 @@ class LapTimeSimCalc:
 
     # GGV surface
     @staticmethod
-    def GGVSurfInterp(vx, ay, X, Y, Z):
-        """ given vx, ay and the GGV vectors (X=ax, Y=ay, Z=speed) returns
-            the ax combined using griddata interpolation """
-        axcombine = interp.griddata((Y, Z), X, (ay, vx),
-                                    method='linear')  # ,fill_value=0.0)
-        return axcombine
+    def GGVSurfInterpreter(X, Y, Z):
+        """ the GGV vectors (X=ax, Y=ay, Z=speed) are used to create an interpolator,
+            that in future will receive ay and vx and return ax, based on GGV vectors."""
+        ggvInterpreter = interp.LinearNDInterpolator(np.column_stack((Y, Z)), X)  # ,fill_value=0.0)
+        return ggvInterpreter     
 
     def Run(self):
         # Split the full GGV in acc and dec, if not already done
         if not self.prevLap:
             self.GGVacc, self.GGVdec = LapTimeSimCalc.splitGGVfull(self.GGVfull)
-
         # Load TrackFile
-        track = np.loadtxt(self.TrackFile)
+        track = self.track
         dist = track[:, 0]
         curv = track[:, 1]
-
         # Speed Calculations
-        small = 0.00000001  # to avoid division by zero
+        small = 0.00000001  # to avoid division by zero    
 
         # 1. Max Cornering Speed ---------------------------------------------
         # if previous lap available use its cornering speed
@@ -112,17 +106,17 @@ class LapTimeSimCalc:
         else:
             vxcor = self.prevLap.lapTimeSimDict["vxcor"]
 
-        # 2. Max Acceleration Speed ------------------------------------------    
+        # 2. Max Acceleration Speed ------------------------------------------
         vxacc = np.zeros(len(curv))
         vxacc[0] = self.vxaccStart  # must be the last vacc
         ayreal = np.zeros(len(curv))
         axcombine = np.zeros(len(curv))
 
         X, Y, Z = self.GGVacc[:, 0], self.GGVacc[:, 1], self.GGVacc[:, 2]
+        ggvInterp = LapTimeSimCalc.GGVSurfInterpreter( X, Y, Z)
         for i in range(len(dist)-1):
             ayreal[i] = pow(vxacc[i], 2)/(1/max(curv[i], small))
-            axcombine[i] = LapTimeSimCalc.GGVSurfInterp(vxacc[i], ayreal[i],
-                                                        X, Y, Z)
+            axcombine[i] = ggvInterp(ayreal[i], vxacc[i])
             vxacc[i+1] = min(vxcor[i+1], (vxacc[i]+(dist[i+1]-dist[i])
                                           / vxacc[i]*axcombine[i]))
             # If a previous lap exists, once it reaches the same speed as the previous lap,
@@ -134,7 +128,6 @@ class LapTimeSimCalc:
                     vxacc[lapPointIndex:] = self.prevLap.lapTimeSimDict["vxacc"][lapPointIndex:]
                     break
 
-
         # 3. Max Deceleration Speed ------------------------------------------
         if not self.prevLap:
             vxdec = np.zeros(len(curv))
@@ -143,10 +136,10 @@ class LapTimeSimCalc:
             axcombine = np.zeros(len(curv))
 
             X, Y, Z = self.GGVdec[:, 0], self.GGVdec[:, 1], self.GGVdec[:, 2]
+            ggvInterp = LapTimeSimCalc.GGVSurfInterpreter( X, Y, Z)
             for i in reversed(range(len(dist))):
                 ayreal[i] = pow(vxdec[i], 2)/(1/max(curv[i], small))
-                axcombine[i] = LapTimeSimCalc.GGVSurfInterp(vxdec[i], ayreal[i],
-                                                            X, Y, Z)
+                axcombine[i] = ggvInterp(ayreal[i], vxdec[i])
                 vxdec[i-1] = min(vxcor[i-1], (vxdec[i]+(dist[i-1]-dist[i])
                                             / vxdec[i]*axcombine[i]))
             vxdec[-1] = vxacc[-1]
